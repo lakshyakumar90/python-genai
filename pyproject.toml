@@ -1,0 +1,31 @@
+[project]
+name = "python-agentic-ai"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "lakshyakumar90", email = "lakshyakumar5023@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi[standard]>=0.141.1",
+    "langchain-community>=0.4.2",
+    "langchain-google-genai>=4.4.0",
+    "langchain-huggingface>=1.2.2",
+    "langchain-openai>=1.6.2",
+    "langchain-qdrant>=1.1.0",
+    "langchain-text-splitters>=1.1.2",
+    "pdfplumber>=0.11.10",
+    "pydantic>=2.13.5",
+    "pypdf>=6.18.1",
+    "redis>=8.1.0",
+    "rq>=2.12.0",
+    "sentence-transformers>=6.0.1",
+]
+
+[project.scripts]
+python-agentic-ai = "python_agentic_ai:main"
+
+[build-system]
+requires = ["uv_build>=0.12.13,<0.13.0"]
+build-backend = "uv_build"
