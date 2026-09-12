@@ -9,12 +9,15 @@ authors = [
 requires-python = ">=3.13"
 dependencies = [
     "fastapi[standard]>=0.141.1",
+    "langchain>=1.4.0",
     "langchain-community>=0.4.2",
     "langchain-google-genai>=4.4.0",
     "langchain-huggingface>=1.2.2",
+    "langchain-ollama>=1.1.0",
     "langchain-openai>=1.6.2",
     "langchain-qdrant>=1.1.0",
     "langchain-text-splitters>=1.1.2",
+    "langgraph>=1.2.11",
     "pdfplumber>=0.11.10",
     "pydantic>=2.13.5",
     "pypdf>=6.18.1",
