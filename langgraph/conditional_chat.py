@@ -74,14 +74,12 @@ def chatbot(state: State):
         "retry_count": retry_count + 1,
     }
 
-
 # --------------------------------------------------
 # 2. AI evaluates the generated answer
 # --------------------------------------------------
-def evaluation_ai(state: State) -> Literal["endnode", "chatbot"]:
+def evaluator(state: State):
     user_input = state["user_input"]
     answer = state.get("llm_output") or ""
-    retry_count = state.get("retry_count", 0)
 
     evaluation_prompt = f"""
     You are an expert AI evaluator.
@@ -135,6 +133,7 @@ def evaluation_ai(state: State) -> Literal["endnode", "chatbot"]:
     )
 
     raw_output = response.choices[0].message.content or ""
+
     print("\n================ EVALUATOR ================")
     print(raw_output)
 
@@ -143,36 +142,64 @@ def evaluation_ai(state: State) -> Literal["endnode", "chatbot"]:
     # --------------------------------------------------------
 
     try:
-        result = json.loads(raw_output)
+        # Remove markdown code fences if Ollama adds them
+        cleaned_output = raw_output.strip()
+
+        if cleaned_output.startswith("```json"):
+            cleaned_output = cleaned_output[7:]
+
+        if cleaned_output.endswith("```"):
+            cleaned_output = cleaned_output[:-3]
+
+        cleaned_output = cleaned_output.strip()
+
+        result = json.loads(cleaned_output)
 
         is_good = bool(result["is_good"])
         evaluation = str(result["evaluation"])
 
     except (json.JSONDecodeError, KeyError, TypeError):
-        # If evaluator itself fails, treat the answer as bad.
+        # If evaluator itself fails, treat answer as bad.
         is_good = False
+
         evaluation = (
-            "Evaluator returned an invalid response. "
+            "The evaluator returned an invalid response. "
             "Regenerate the answer and try again."
         )
 
     # --------------------------------------------------------
-    # Update state
+    # IMPORTANT:
+    # Evaluator returns STATE UPDATE, not routing decision.
     # --------------------------------------------------------
 
-    state["is_good"] = is_good
-    state["evaluation"] = evaluation
+    return {
+        "is_good": is_good,
+        "evaluation": evaluation,
+    }
 
-    # --------------------------------------------------------
-    # Decide where the graph should go
-    # --------------------------------------------------------
+# --------------------------------------------------
+# 3. Decide what happens after evaluation
+# --------------------------------------------------
 
+MAX_RETRIES = 3
+
+
+def evaluator_router(state: State) -> Literal["endnode", "chatbot"]:
+
+    is_good = state.get("is_good", False)
+    retry_count = state.get("retry_count", 0)
+
+    # Answer is good → finish
     if is_good:
         return "endnode"
 
-    else:
-        return "chatbot"
+    # Too many attempts → stop
+    if retry_count >= MAX_RETRIES:
+        print("\nMaximum regeneration attempts reached.")
+        return "endnode"
 
+    # Answer is bad → regenerate
+    return "chatbot"
 
 # ============================================================
 # END NODE
@@ -197,6 +224,7 @@ graph_builder = StateGraph(State)
 
 graph_builder.add_node("chatbot", chatbot)
 graph_builder.add_node("evaluator", evaluator)
+graph_builder.add_node("evaluator_router", evaluator_router)
 graph_builder.add_node("endnode", endnode)
 
 
@@ -217,7 +245,7 @@ graph_builder.add_edge(
 # evaluator → either END or regenerate
 graph_builder.add_conditional_edges(
     "evaluator",
-    lambda state: "endnode" if state["is_good"] else "chatbot",
+    evaluator_router,
     {
         "endnode": "endnode",
         "chatbot": "chatbot",
