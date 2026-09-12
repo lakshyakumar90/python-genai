@@ -16,56 +16,112 @@ class State(TypedDict):
     llm_output: Optional[str]
     is_good: Optional[bool]
     evaluation: Optional[str]
+    retry_count: int
 
 
 # --------------------------------------------------
 # 1. Generate the answer
 # --------------------------------------------------
 def chatbot(state: State):
+    user_input = state["user_input"]
+    previous_answer = state.get("llm_output")
+    evaluation = state.get("evaluation")
+    retry_count = state.get("retry_count", 0)
+
+    # --------------------------------------------------------
+    # First generation
+    # --------------------------------------------------------
+
+    if retry_count == 0:
+        prompt = f"""
+        Answer the user's question accurately and clearly.
+
+        USER QUESTION:
+        {user_input}
+        """
+    else:
+        prompt = f"""
+        You previously generated an answer to the user's question,
+        but another AI evaluator determined that the answer was not good.
+
+        Your job is to regenerate a substantially improved answer.
+
+        USER QUESTION:
+        {user_input}
+
+        PREVIOUS ANSWER:
+        {previous_answer}
+
+        EVALUATOR FEEDBACK:
+        {evaluation}
+
+        Instructions:
+
+        1. Fix every problem identified by the evaluator.
+        2. Do not repeat the same mistakes.
+        3. Make sure the answer directly answers the user's question.
+        4. Keep the answer clear and accurate.
+        5. Return ONLY the new answer.
+        """
+
     response = client.chat.completions.create(
         model="gemma4:e2b",
-        messages=[{"role": "user", "content": state.get("user_input")}],
+        messages=[{"role": "user", "content": prompt}],
     )
 
-    return {"llm_output": response.choices[0].message.content}
+    return {
+        "llm_output": response.choices[0].message.content,
+        "retry_count": retry_count + 1,
+    }
 
 
 # --------------------------------------------------
 # 2. AI evaluates the generated answer
 # --------------------------------------------------
-def evaluation_ai(state: State):
-    user_question = state["user_input"]
-    answer = state["llm_output"] or ""
+def evaluation_ai(state: State) -> Literal["endnode", "chatbot"]:
+    user_input = state["user_input"]
+    answer = state.get("llm_output") or ""
+    retry_count = state.get("retry_count", 0)
 
     evaluation_prompt = f"""
-    You are an AI answer evaluator.
+    You are an expert AI evaluator.
 
-    Evaluate the answer produced by another AI.
+    Your job is to determine whether the generated answer is good
+    enough to be returned to the user.
 
     USER QUESTION:
-    {user_question}
+    {user_input}
 
-    AI ANSWER:
+    GENERATED ANSWER:
     {answer}
 
-    Determine whether the AI answer is good.
-
-    Evaluate it based on:
+    Evaluate the answer using these criteria:
 
     1. Correctness
-    2. Relevance to the user's question
-    3. Clarity
-    4. Whether it actually answers the question
-    5. Whether it contains obvious hallucinations or incorrect claims
+    2. Relevance
+    3. Completeness
+    4. Clarity
+    5. Whether it actually answers the user's question
+    6. Whether it contains hallucinations or incorrect information
 
-    Return ONLY valid JSON in this exact format:
+    If the answer is good enough, mark it as good.
+
+    If the answer is not good enough, mark it as bad and explain
+    exactly what needs to be improved.
+
+    Return ONLY valid JSON:
 
     {{
         "is_good": true,
-        "evaluation": "Short explanation of why the answer is good or bad."
+        "evaluation": "The answer is correct, relevant and sufficiently clear."
     }}
 
-    "is_good" must be either true or false.
+    OR:
+
+    {{
+        "is_good": false,
+        "evaluation": "The answer does not explain X and incorrectly claims Y. It should..."
+    }}
     """
 
     response = client.chat.completions.create(
@@ -79,64 +135,109 @@ def evaluation_ai(state: State):
     )
 
     raw_output = response.choices[0].message.content or ""
+    print("\n================ EVALUATOR ================")
+    print(raw_output)
+
+    # --------------------------------------------------------
+    # Parse evaluator response
+    # --------------------------------------------------------
 
     try:
         result = json.loads(raw_output)
 
-        return {
-            "is_good": bool(result["is_good"]),
-            "evaluation": result["evaluation"],
-        }
+        is_good = bool(result["is_good"])
+        evaluation = str(result["evaluation"])
 
     except (json.JSONDecodeError, KeyError, TypeError):
-        # Fallback if the local model doesn't return valid JSON
-        return {
-            "is_good": False,
-            "evaluation": f"Evaluator returned an invalid response: {raw_output}",
-        }
+        # If evaluator itself fails, treat the answer as bad.
+        is_good = False
+        evaluation = (
+            "Evaluator returned an invalid response. "
+            "Regenerate the answer and try again."
+        )
+
+    # --------------------------------------------------------
+    # Update state
+    # --------------------------------------------------------
+
+    state["is_good"] = is_good
+    state["evaluation"] = evaluation
+
+    # --------------------------------------------------------
+    # Decide where the graph should go
+    # --------------------------------------------------------
+
+    if is_good:
+        return "endnode"
+
+    else:
+        return "chatbot"
+
+
+# ============================================================
+# END NODE
+# ============================================================
 
 
 def endnode(state: State):
+
     return {
         "llm_output": state["llm_output"],
         "is_good": state["is_good"],
         "evaluation": state["evaluation"],
+        "retry_count": state["retry_count"],
     }
 
 
-# --------------------------------------------------
-# Build graph
-# --------------------------------------------------
+# ============================================================
+# BUILD GRAPH
+# ============================================================
 
 graph_builder = StateGraph(State)
 
 graph_builder.add_node("chatbot", chatbot)
-graph_builder.add_node("evaluation_ai", evaluation_ai)
+graph_builder.add_node("evaluator", evaluator)
 graph_builder.add_node("endnode", endnode)
 
-graph_builder.add_edge(START, "chatbot")
 
+# START
+graph_builder.add_edge(
+    START,
+    "chatbot",
+)
+
+
+# chatbot → evaluator
 graph_builder.add_edge(
     "chatbot",
-    "evaluation_ai",
+    "evaluator",
 )
 
-graph_builder.add_edge(
-    "evaluation_ai",
-    "endnode",
+
+# evaluator → either END or regenerate
+graph_builder.add_conditional_edges(
+    "evaluator",
+    lambda state: "endnode" if state["is_good"] else "chatbot",
+    {
+        "endnode": "endnode",
+        "chatbot": "chatbot",
+    },
 )
 
+
+# end
 graph_builder.add_edge(
     "endnode",
     END,
 )
 
+
 graph = graph_builder.compile()
 
 
-# --------------------------------------------------
-# Run
-# --------------------------------------------------
+# ============================================================
+# RUN
+# ============================================================
 
 output = graph.invoke(
     {
@@ -144,25 +245,30 @@ output = graph.invoke(
         "llm_output": None,
         "is_good": None,
         "evaluation": None,
+        "retry_count": 0,
     }
 )
 
-print("\n==============================")
-print("USER QUESTION")
-print("==============================")
+
+# ============================================================
+# RESULT
+# ============================================================
+
+print("\n\n========================================")
+print("FINAL RESULT")
+print("========================================")
+
+print("\nQuestion:")
 print(output["user_input"])
 
-print("\n==============================")
-print("AI ANSWER")
-print("==============================")
+print("\nFinal Answer:")
 print(output["llm_output"])
 
-print("\n==============================")
-print("IS GOOD?")
-print("==============================")
+print("\nIs Good:")
 print(output["is_good"])
 
-print("\n==============================")
-print("AI EVALUATION")
-print("==============================")
+print("\nEvaluator Feedback:")
 print(output["evaluation"])
+
+print("\nRegeneration Attempts:")
+print(output["retry_count"])
